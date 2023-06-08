@@ -5,4 +5,4 @@
 
 
 
-### Additonally, this repo contains the final report produced by the primary author. 
+### Additonally, this repo contains the final report produced by the primary author. *Regression statistics and data visualizations can be found at the end of the report*
