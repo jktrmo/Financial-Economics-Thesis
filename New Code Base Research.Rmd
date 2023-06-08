@@ -1,0 +1,339 @@
+--
+title: "Untitled"
+output: html_document
+date: "2023-02-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+library(RPostgres)
+wrds <- dbConnect(Postgres(), 
+                  host='wrds-pgdata.wharton.upenn.edu',
+                  port=9737,
+                  sslmode='require',
+                  dbname='wrds',
+                  user='ryank4301',
+                  password = 'Bossmanrsk.20011')
+```
+
+```{r}
+res <- dbSendQuery(wrds, "select * from fisd.fisd_issue_agents")
+data <- dbFetch(res, n=-1)
+dbClearResult(res)
+data
+```
+
+```{r}
+data_2 <- filter(data, agent_type == "LU")
+data_2["ISSUE_ID"] <- pull(data_2, issue_id)
+```
+
+```{r}
+master_1 <- left_join(e09hq3bsrzkwfbip, data_2, by = "ISSUE_ID")
+master_1
+
+master_2 <- master_1 %>% drop_na(agent_id)
+```
+
+```{r}
+res <- dbSendQuery(wrds, "select * from fisd.fisd_agent")
+agent_names <- dbFetch(res, n=-1)
+dbClearResult(res)
+agent_names
+```
+
+```{r}
+Agent_Submaster <- left_join(data_2, agent_names, by = "agent_id")
+
+```
+
+```{r}
+#Function to convert string object of form "$XXX,XXX,XXX..." to numeric
+clean <- function(x){
+  l1 <- str_split(x, ",")
+  l1 <- unlist(l1)
+  l1[1] <- sub(".", "", l1[1])
+  li <- paste(l1, collapse = "")
+  return(as.numeric(li))
+}
+
+#Applying clean to get numeric values for T_Volume in Master
+vec <- lapply(pull(master_2, T_Volume), clean)
+vec <- unlist(vec)
+master_2["T_Volume"] <- vec
+
+```
+
+```{r}
+#Get the 50 highest volume agent_id's
+
+new_tab <- master_2 %>% group_by(agent_id) %>% summarise(tot_vol = sum(T_Volume))
+
+IDS <- new_tab %>% arrange(desc(tot_vol)) %>% slice(1:50) %>% pull(agent_id)
+
+#Create new table with only the top 50 underwriters
+
+master_3 <- filter(master_2, agent_id %in% IDS)
+
+```
+
+### Each row in master_3 denotes an instance of a transaction of a given bond for a unique underwriter. Each transaction is listed precisely the number times that it has underwriters. 
+
+```{r}
+#Table listing the names of underwriters with corresponding agent ID
+
+underwriters <- filter(agent_names, agent_id %in% IDS) %>% select(agent_id, legal_name)
+
+underwriters["covered"] <- c(rep(1,19), 0, rep(1,9), 0,0, rep(1,4), 0,1,0,1,0,1,0, rep(1,8))
+
+```
+
+```{r}
+#Adding the names of institutions
+
+Agent_Submaster <- Agent_Submaster %>%  filter(agent_id %in% IDS)
+
+master_4 <- left_join(master_3, underwriters, by = "agent_id")
+```
+
+```{r}
+#Preprocessing for Amihud 
+master_4 <- master_4 %>% drop_na(RET_EOM)
+
+#Function to convert string object of form "-X.XXX%" to numeric
+clean_2 <- function(x){
+  l1 <- str_sub(x, 1, -2)
+  return(as.numeric(l1))
+}
+
+#Applying clean to get numeric values for RET_EOM in Master
+vec <- lapply(pull(master_4, RET_EOM), clean_2)
+vec <- unlist(vec)
+master_4["RET_EOM"] <- vec
+
+```
+
+```{r}
+#Preprocessing Amihud 2
+
+clean_3 <- function(x){
+  l1 <- str_sub(x, 1, 6)
+  return(as.numeric(l1))
+}
+
+vec <- lapply(pull(master_4, DATE), clean_3)
+vec <- unlist(vec)
+master_4["YR_MON"] <- vec
+
+```
+
+```{r}
+#Calculating Amihud 1
+
+amihud_1 <- master_4 %>% select(
+  ISSUE_ID,
+  YR_MON,
+  T_Volume,
+  RET_EOM) %>% group_by(ISSUE_ID, YR_MON) %>% summarise(
+    num_trades = n(),
+    agg_sum = sum(abs(RET_EOM) / T_Volume)
+  )
+
+```
+
+```{r}
+#Calculating Amihud 2
+
+amihud_final <- amihud_1 %>% group_by(ISSUE_ID, YR_MON) %>% summarise(
+  AMIHUD = agg_sum / num_trades
+)
+
+amihud_final["AMIHUD"] <- pull(amihud_final, AMIHUD) * 1000000
+
+```
+
+```{r}
+#Modifying Amihud table for analysis
+
+amihud_final <- inner_join(amihud_final, select(Agent_Submaster, ISSUE_ID, legal_name), by = "ISSUE_ID")
+
+```
+
+```{r}
+#Adding "covered indicators" to amihud final
+
+amihud_final <- left_join(amihud_final, select(underwriters, legal_name, covered), by = "legal_name")
+
+```
+
+```{r}
+#Matching
+
+unc <- unique(pull(filter(amihud_final, covered == 0), ISSUE_ID))
+
+vec <- lapply(pull(master_4, OFFERING_DATE), clean_3)
+vec <- unlist(vec)
+master_4["OFFERING_DATE"] <- vec
+
+new_mast <- filter(master_4, !ISSUE_ID %in% unc)
+```
+
+```{r}
+#Pre-processing for Matching
+
+issue_ids <- unique(pull(amihud_final, ISSUE_ID))
+
+vec <- lapply(pull(master_4, OFFERING_DATE), clean_3)
+vec <- unlist(vec)
+master_4["OFFERING_DATE"] <- vec
+
+match <- master_4 %>% filter(ISSUE_ID %in% issue_ids) %>% select(ISSUE_ID, RATING_CLASS, OFFERING_AMT, OFFERING_DATE, covered) %>% distinct()
+
+```
+
+```{r}
+#More Pre-processing
+
+match <- match %>% drop_na(RATING_CLASS)
+
+unc <- pull(filter(match, covered == 0), ISSUE_ID)
+new_mast <- filter(match, !ISSUE_ID %in% unc)
+
+matched_ID <- c()
+
+for (i in unc){
+  rat <- match %>% filter(ISSUE_ID == i) %>% pull(RATING_CLASS)
+  vol <- match %>% filter(ISSUE_ID == i) %>% pull(OFFERING_AMT)
+  date <- match %>% filter(ISSUE_ID == i) %>% pull(OFFERING_DATE)
+
+  init <- new_mast %>% filter(RATING_CLASS == rat & OFFERING_DATE == date)
+  thing <- pull(init, OFFERING_AMT)
+  ob <- abs(thing - rep(vol, length(thing)))
+  index <- which.min(ob)
+  ID <- init[index, ] %>% pull(ISSUE_ID)
+  new_mast <- new_mast %>% filter(ISSUE_ID != ID)
+  matched_ID <- c(matched_ID, ID)
+}
+  
+
+```
+
+```{r}
+#Finalizing Amihud
+
+ID <- c(unc, matched_ID)
+
+Amihud <- amihud_final %>% filter(ISSUE_ID %in% ID)
+
+Amihud <- Amihud %>% select(!legal_name) %>% group_by(ISSUE_ID, YR_MON, AMIHUD) %>% summarise(cov = as.numeric(!(0 %in% covered)))
+
+```
+```{r}
+#Adding Dates
+
+da <- pull(Amihud, YR_MON)
+
+dat <- c()
+
+for (i in da){
+  if (i > 202006){
+    dat <- c(dat, 1)
+  } else {
+    dat <- c(dat, 0)
+  }
+}
+
+Amihud["Before_After"] <- dat
+```
+
+
+```{r}
+
+Regression_1 <- lm(AMIHUD ~ cov + Before_After + cov*Before_After, data = Amihud)
+
+summary(Regression_1)
+
+
+```
+
+```{r}
+library(lubridate)
+```
+
+```{r}
+#Removing Outliers for plotting purposes
+
+Amihud_2 <- Amihud %>% filter(AMIHUD < 4000)
+
+
+```
+
+```{r}
+
+ggplot(data = Amihud_2, aes(x = ym(YR_MON), y = AMIHUD)) +
+    geom_point(aes(color = factor(cov))) +
+    labs(title = "Scatter Plot of Empirical Data",
+        subtitle = "Using Final Matched Bonds, Excluding Outliers",
+        x = "Trading Date",
+        y = "Amihud Metric of Illiquidity") +
+    geom_vline(xintercept = ym(202006), color = "blue", size=0.5, alpha = 0.7) + scale_x_date() + scale_y_log10() + guides(color = guide_legend(title = "Covered")) + theme_stata()
+
+
+
+
+```
+
+
+```{r}
+#Line plot
+
+library(haven)
+library(ggthemes)
+
+colors <- c("covered" = "blue", "uncovered" = "red")
+
+Amihud_3 <- filter(Amihud_2, AMIHUD < 10)
+
+am_cov <- Amihud_3 %>% filter(cov == 0) %>% select(YR_MON, AMIHUD) %>% group_by(YR_MON) %>% summarise(ami = mean(AMIHUD))
+
+am_uncov <- Amihud_3 %>% filter(cov == 1) %>% select(YR_MON, AMIHUD) %>% group_by(YR_MON) %>% summarise(ami = mean(AMIHUD))
+
+ggplot() +
+  geom_smooth(data = am_cov, aes(x = YR_MON, y = ami), color = "blue", alpha = 0.7, fill = "lightskyblue1") +
+  geom_smooth(data = am_uncov, aes(x = YR_MON, y = ami), color = "red", alpha = 0.7, fill = "pink") +
+  geom_vline(xintercept = 202006, color = "black", size=1, alpha = 0.7) +
+    labs(title = "Average Monthly Amihud with 95% CI",
+         subtitle = "Blue = Covered, Red = Uncovered",
+         x = "Trading Date",
+         y = "Amihud Metric of Illiquidity",
+         color = "Covered") + 
+  scale_color_manual(values = colors) +
+  theme_stata()
+
+
+
+```
+
+```{r}
+
+tidyverse_update(recursive = FALSE, repos = getOption("repos"))
+library(stargazer)
+stargazer(Regression_1, type = "text")
+
+```
+
+
+
+
+
+
+
+
+
